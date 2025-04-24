@@ -1,0 +1,45 @@
+/target
+
+/.idea
+
+/test
+
+/rules
+
+# === Rust build ===
+/target
+**/*.rs.bk
+
+# === Rust package manager ===
+Cargo.lock
+.cargo/
+
+# === Binaries ===
+*.exe
+*.dll
+*.so
+*.dylib
+
+# === MacOS ===
+.DS_Store
+
+# === Linux ===
+*.swp
+*~
+
+# === Logs ===
+*.log
+
+# === VSCode ===
+.vscode/
+*.code-workspace
+
+# === WSL ===
+.wsl*
+
+# === Backups ===
+*.bak
+*.tmp
+
+# === Custom ===
+/home/rust_udev/testdev/
