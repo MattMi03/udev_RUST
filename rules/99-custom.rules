@@ -1,0 +1,1 @@
+SUBSYSTEM=="usb", ACTION=="add", DEVTYPE=="usb_device", MODE="0660", OWNER="root", GROUP="plugdev", SYMLINK+="my_usb_device", RUN+="/bin/echo USB inserted"

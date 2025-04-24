@@ -1,55 +1,84 @@
+// src/monitor.rs
 use nix::sys::socket::{
     socket, bind, recv, AddressFamily, SockType, SockFlag,
     NetlinkAddr, MsgFlags, SockProtocol
 };
+use nix::unistd::close;
 use std::io;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{RawFd, AsRawFd};
+use std::collections::HashMap;
+use log::{info, warn, error};
 
-fn create_uevent_socket() -> std::io::Result<RawFd> {
-    // 构造 Netlink 协议类型（关键修正）
-    let protocol = SockProtocol::NetlinkKObjectUEvent; // 使用枚举常量代替魔数 15
-
-    let fd = socket(
-        AddressFamily::Netlink,
-        SockType::Datagram,
-        SockFlag::empty(),
-        Some(protocol) // 必须用 Some 包裹协议类型
-    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("socket error: {e}")))?;
-
-    // 绑定到组1接收广播
-    let addr = NetlinkAddr::new(0, 1);
-    bind(fd, &addr)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("bind error: {e}")))?;
-
-    Ok(fd)
+pub struct UEventMonitor {
+    fd: RawFd,
 }
 
-// start_monitor函数保持不变
+impl UEventMonitor {
+    pub fn new() -> io::Result<Self> {
+        let protocol = SockProtocol::NetlinkKObjectUEvent;
 
-/// 开始监听 udev uevent
-pub fn start_monitor() -> io::Result<()> {
-    let fd = create_uevent_socket()?;
+        let fd = socket(
+            AddressFamily::Netlink,
+            SockType::Raw,
+            SockFlag::empty(),
+            Some(protocol)
+        ).map_err(|e| {
+            error!("Socket creation failed: {}", e);
+            io::Error::new(io::ErrorKind::Other, format!("socket error: {e}"))
+        })?;
 
-    println!("🔌 Listening for udev events... (Ctrl+C to stop)");
+        let addr = NetlinkAddr::new(0, 1);
+        bind(fd, &addr).map_err(|e| {
+            error!("Socket binding failed: {}", e);
+            io::Error::new(io::ErrorKind::Other, format!("bind error: {e}"))
+        })?;
 
-    loop {
+        info!("UEvent monitor initialized");
+        Ok(Self { fd })
+    }
+
+    pub fn receive_event(&self) -> io::Result<HashMap<String, String>> {
         let mut buf = [0u8; 4096];
-        let size = recv(fd, &mut buf, MsgFlags::empty())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("recv error: {e}")))?;
 
-        if size > 0 {
-            // 打印接收到的原始字节
-            println!("📥 Raw uevent received: {:?}", &buf[..size]);
+        match recv(self.fd, &mut buf, MsgFlags::empty()) {
+            Ok(size) if size > 0 => {
+                let msg = String::from_utf8_lossy(&buf[..size]);
+                let mut event_map = HashMap::new();
 
-            // 你可以选择在这里尝试解析消
-            let msg = String::from_utf8_lossy(&buf[..size]);
-            println!("<UNK> Monitor received:");
-            for field in msg.split('\0') {
-                if !field.is_empty() {
-                    println!("KeyValue: {}", field);
+                for field in msg.split('\0') {
+                    if let Some((k, v)) = field.split_once('=') {
+                        // println!("Key: {}, Value: {}", k, v);
+                        event_map.insert(k.to_string(), v.to_string());
+                    }
                 }
+
+                Ok(event_map)
+            },
+            Ok(_) => {
+                warn!("Empty packet received");
+                Err(io::ErrorKind::WouldBlock.into())
+            },
+            Err(e) if e == nix::errno::Errno::EAGAIN => {
+                Err(io::ErrorKind::WouldBlock.into())
+            },
+            Err(e) => {
+                error!("Receive error: {}", e);
+                Err(io::Error::new(io::ErrorKind::Other, format!("recv error: {e}")))
             }
-            println!("=========================================");
         }
+    }
+}
+
+impl Drop for UEventMonitor {
+    fn drop(&mut self) {
+        if let Err(e) = close(self.fd) {
+            error!("Failed to close socket: {}", e);
+        }
+    }
+}
+
+impl AsRawFd for UEventMonitor {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
     }
 }
