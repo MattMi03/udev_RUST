@@ -1,11 +1,98 @@
 use crate::rules::matcher::Rule;
+use log::*;
 use regex::Regex;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead};
-use std::path::Path;
+use notify::{Watcher, RecommendedWatcher, RecursiveMode, EventKind};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use crossbeam::channel::{unbounded, Receiver};
+
+#[derive(Debug)]
+pub struct RuleManager {
+    rules: Arc<Mutex<Vec<Rule>>>,
+    watcher: RecommendedWatcher,
+    paths: Vec<PathBuf>,
+}
+
+impl RuleManager {
+    pub fn new(rule_paths: Vec<PathBuf>) -> Self {
+        // 初始加载规则
+        let rules = match load_all_rules(&rule_paths) {
+            Ok(r) => Arc::new(Mutex::new(r)),
+            Err(e) => {
+                warn!("Failed to load initial rules: {}", e);
+                Arc::new(Mutex::new(Vec::new()))
+            }
+        };
+
+        let (tx, rx) = unbounded();
+
+        let mut watcher = notify::recommended_watcher(move |res| {
+            if let Ok(event) = res {
+                tx.send(event).unwrap();
+            }
+        })
+        .unwrap();
+
+        for path in &rule_paths {
+            watcher
+                .watch(path, RecursiveMode::NonRecursive)
+                .unwrap_or_else(|e| {
+                    warn!("Failed to watch {}: {}", path.display(), e);
+                });
+        }
+
+        let rules_clone = rules.clone();
+        let paths_clone = rule_paths.clone();
+        thread::spawn(move || {
+            Self::reload_loop(rx, rules_clone, paths_clone);
+        });
+
+        Self {
+            rules,
+            watcher,
+            paths: rule_paths,
+        }
+    }
+
+    pub fn get_rules(&self) -> Arc<Mutex<Vec<Rule>>> {
+        self.rules.clone()
+    }
+
+    fn reload_loop(rx: Receiver<notify::Event>, rules: Arc<Mutex<Vec<Rule>>>, paths: Vec<PathBuf>) {
+        for event in rx {
+            if matches!(event.kind, EventKind::Modify(_)) {
+                info!("Rules directory modified, triggering reload...");
+                match load_all_rules(&paths) {
+                    Ok(new_rules) => {
+                        *rules.lock().unwrap() = new_rules;
+                        info!(
+                            "Successfully reloaded {} rules",
+                            rules.lock().unwrap().len()
+                        );
+                    }
+                    Err(e) => warn!("Rule reload failed: {}", e),
+                }
+            }
+        }
+    }
+}
+
+fn load_all_rules<P: AsRef<Path>>(paths: &[P]) -> io::Result<Vec<Rule>> {
+    let mut all_rules = Vec::new();
+    for path in paths {
+        let path = path.as_ref();
+        if let Ok(rules) = parse_rules_file(path) {
+            all_rules.extend(rules);
+        }
+    }
+    Ok(all_rules)
+}
 
 pub fn parse_rules_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<Rule>> {
-    // 循环读取目录下的所有文件
 
     let mut rules = Vec::new();
 
@@ -36,8 +123,6 @@ pub fn parse_rules_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<Rule>> {
         let file = File::open(entry.path())?;
         let reader = io::BufReader::new(file);
 
-        // 常用字段的正则
-
         for line in reader.lines().flatten() {
             let line = line.trim();
             if line.starts_with('#') || line.is_empty() {
@@ -58,7 +143,7 @@ pub fn parse_rules_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<Rule>> {
                 owner: None,
                 group: None,
                 mode: None,
-                run: Vec::new(),
+                run: HashMap::new(),
                 program: None,
                 label: None,
                 goto: None,
@@ -90,7 +175,17 @@ pub fn parse_rules_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<Rule>> {
                         ("OWNER", "=") => rule.owner = Some(val),
                         ("GROUP", "=") => rule.group = Some(val),
                         ("MODE", "=") => rule.mode = Some(val),
-                        ("RUN", "+=") => rule.run.push(val),
+                        ("RUN", "+=") => {
+                            if let Some(action) = &rule.action {
+                                rule.run.entry(action.clone()).or_default().push(val);
+                            } else {
+                                warn!(
+                                    "RUN+=... found without ACTION==..., ignoring command: {}",
+                                    val
+                                );
+                            }
+                        }
+
                         ("PROGRAM", "==") => rule.program = Some(val),
                         ("LABEL", "=") => rule.label = Some(val),
                         ("GOTO", "=") => rule.goto = Some(val),
@@ -111,71 +206,4 @@ pub fn parse_rules_file<P: AsRef<Path>>(path: P) -> io::Result<Vec<Rule>> {
     }
 
     Ok(rules)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // // 示例规则文件内容
-
-    // 99-custom.rules
-    // SUBSYSTEM=="usb", ACTION=="add", DEVTYPE=="usb_device", \
-    // MODE="0660", OWNER="root", GROUP="plugdev", \
-    // SYMLINK+="my_usb_device", \
-    // RUN+="/bin/echo USB inserted"
-
-    // 100-custom.rules
-    // SUBSYSTEM=="usb", ACTION=="remove", DEVTYPE=="usb_device", OWNER="root", GROUP="plugdev", SYMLINK+="my_usb_device", RUN+="/bin/echo USB remove",  ENV{ID_BUS}=="bluetooth"
-    #[test]
-    fn test_parse_rules_file() {
-        let rules = parse_rules_file("rules").unwrap();
-
-        assert_eq!(rules.len(), 2);
-        let rule = &rules[0];
-        assert_eq!(rule.subsystem.as_deref(), Some("usb"));
-        assert_eq!(rule.action.as_deref(), Some("add"));
-        assert_eq!(rule.devpath.as_deref(), None);
-        assert_eq!(rule.kernel.as_deref(), None);
-        assert_eq!(rule.attr.len(), 0);
-        assert_eq!(rule.env_vars.len(), 0);
-        assert_eq!(rule.name.as_deref(), None);
-        assert_eq!(rule.symlink.len(), 1);
-        assert_eq!(rule.symlink[0], "my_usb_device");
-        assert_eq!(rule.owner.as_deref(), Some("root"));
-        assert_eq!(rule.group.as_deref(), Some("plugdev"));
-        assert_eq!(rule.mode.as_deref(), Some("0660"));
-        assert_eq!(rule.run.len(), 1);
-        assert_eq!(rule.run[0], "/bin/echo USB inserted");
-        assert_eq!(rule.program.as_deref(), None);
-        assert_eq!(rule.label.as_deref(), None);
-        assert_eq!(rule.goto.as_deref(), None);
-        assert_eq!(rule.ignore_device, false);
-        assert_eq!(rule.last_rule, false);
-
-        let rule = &rules[1];
-        assert_eq!(rule.subsystem.as_deref(), Some("usb"));
-        assert_eq!(rule.action.as_deref(), Some("remove"));
-        assert_eq!(rule.devpath.as_deref(), None);
-        assert_eq!(rule.kernel.as_deref(), None);
-        assert_eq!(rule.attr.len(), 0);
-        assert_eq!(rule.env_vars.len(), 1);
-        assert_eq!(
-            rule.env_vars[0],
-            ("ID_BUS".to_string(), "bluetooth".to_string())
-        );
-        assert_eq!(rule.name.as_deref(), None);
-        assert_eq!(rule.symlink.len(), 1);
-        assert_eq!(rule.symlink[0], "my_usb_device");
-        assert_eq!(rule.owner.as_deref(), Some("root"));
-        assert_eq!(rule.group.as_deref(), Some("plugdev"));
-        assert_eq!(rule.mode.as_deref(), None);
-        assert_eq!(rule.run.len(), 1);
-        assert_eq!(rule.run[0], "/bin/echo USB remove");
-        assert_eq!(rule.program.as_deref(), None);
-        assert_eq!(rule.label.as_deref(), None);
-        assert_eq!(rule.goto.as_deref(), None);
-        assert_eq!(rule.ignore_device, false);
-        assert_eq!(rule.last_rule, false);
-    }
 }

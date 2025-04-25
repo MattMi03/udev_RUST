@@ -1,7 +1,9 @@
+///  src/actions.rs
+
 mod monitor;
 use rust_udev::udevd::start_udevd;
 use rust_udev::udevadm::udevadm_cli;
-use clap::{Command};
+use clap::Command;
 use log::{info, error};
 
 fn run_udevadm() {

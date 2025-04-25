@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -12,31 +13,44 @@ pub struct Rule {
     pub tag: Option<String>,
 
     // 属性和环境变量匹配
-    pub attr: Vec<(String, String)>,     // ATTR{key}=="value"
-    pub env_vars: Vec<(String, String)>, // ENV{key}=="value"
+    pub attr: Vec<(String, String)>,
+    pub env_vars: Vec<(String, String)>,
 
     // 文件创建控制
-    pub name: Option<String>,  // NAME="xxx"
-    pub symlink: Vec<String>,  // SYMLINK+="foo"
-    pub owner: Option<String>, // OWNER="user"
-    pub group: Option<String>, // GROUP="plugdev"
-    pub mode: Option<String>,  // MODE="0660"
+    pub name: Option<String>,
+    pub symlink: Vec<String>,
+    pub owner: Option<String>,
+    pub group: Option<String>,
+    pub mode: Option<String>,
 
     // 运行操作
-    pub run: Vec<String>,        // RUN+="/bin/foo"
-    pub program: Option<String>, // PROGRAM=="/usr/bin/foo"
+    pub run: HashMap<String, Vec<String>>,
+    pub program: Option<String>,
 
     // 内部跳转控制
-    pub label: Option<String>, // LABEL="mylabel"
-    pub goto: Option<String>,  // GOTO="mylabel"
+    pub label: Option<String>,
+    pub goto: Option<String>,
 
     // 其他标志
-    pub ignore_device: bool, // OPTIONS+="ignore_device"
-    pub last_rule: bool,     // OPTIONS+="last_rule"
+    pub ignore_device: bool,
+    pub last_rule: bool,
 }
 
 impl Rule {
     pub fn matches(&self, event: &std::collections::HashMap<String, String>) -> bool {
+        let has_conditions = self.action.is_some()
+            || self.subsystem.is_some()
+            || self.kernel.is_some()
+            || self.devpath.is_some()
+            || self.driver.is_some()
+            || self.tag.is_some()
+            || !self.env_vars.is_empty()
+            || !self.attr.is_empty();
+
+        if !has_conditions {
+            return false;
+        }
+        
         if let Some(action) = &self.action {
             if event.get("ACTION") != Some(action) {
                 return false;
@@ -96,7 +110,7 @@ impl Rule {
                             return false;
                         }
                     }
-                    Err(_) => return false, // 属性不存在或无法读取
+                    Err(_) => return false,
                 }
             }
         } else if !self.attr.is_empty() {
@@ -127,7 +141,7 @@ mod tests {
             owner: None,
             group: None,
             mode: None,
-            run: Vec::new(),
+            run: HashMap::new(),
             program: None,
             label: None,
             goto: None,

@@ -1,1 +1,11 @@
-SUBSYSTEM=="usb", ACTION=="add", DEVTYPE=="usb_device", MODE="0660", OWNER="root", GROUP="plugdev", SYMLINK+="my_usb_device", RUN+="/bin/echo USB inserted"
+# USB device added
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", MODE="0666", OWNER="root", GROUP="root", SYMLINK+="usb-%k", RUN+="echo /usr/bin/logger USB add"
+
+# USB device bound to driver
+ACTION=="bind", SUBSYSTEM=="usb", DEVTYPE=="usb_device", RUN+="echo /usr/bin/logger USB bind"
+
+# USB device unbound from driver
+ACTION=="unbind", SUBSYSTEM=="usb", DEVTYPE=="usb_device", RUN+="echo /usr/bin/logger USB unbind"
+
+# USB device removed
+ACTION=="remove", SUBSYSTEM=="usb", DEVTYPE=="usb_device",  RUN+="echo /usr/bin/logger USB remove"
