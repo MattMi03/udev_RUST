@@ -13,6 +13,7 @@ pub struct UEventMonitor {
     fd: RawFd,
 }
 
+#[allow(dead_code)]
 impl UEventMonitor {
     pub fn new() -> io::Result<Self> {
         let protocol = SockProtocol::NetlinkKObjectUEvent;

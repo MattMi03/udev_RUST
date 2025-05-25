@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam::channel::{unbounded, Receiver};
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RuleManager {
     rules: Arc<Mutex<Vec<Rule>>>,

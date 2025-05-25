@@ -5,3 +5,4 @@ pub mod libudev;
 pub mod udevd;
 pub mod actions;
 pub mod udevadm;
+pub mod device;

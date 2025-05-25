@@ -1,5 +1,5 @@
 # USB device added
-ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", MODE="0666", OWNER="root", GROUP="root", SYMLINK+="usb-%k", RUN+="echo /usr/bin/logger USB add"
+ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", MODE="0606", OWNER="root", GROUP="root", SYMLINK+="usb-%d", RUN+="echo /usr/bin/logger USB add"
 
 # USB device bound to driver
 ACTION=="bind", SUBSYSTEM=="usb", DEVTYPE=="usb_device", RUN+="echo /usr/bin/logger USB bind"

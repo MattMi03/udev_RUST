@@ -1,6 +1,5 @@
 /// src/actions.rs
 use nix::sys::stat::{makedev, mknod, Mode, SFlag};
-use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -9,33 +8,58 @@ use std::process::Command;
 use log::*;
 use users::{get_group_by_name, get_user_by_name};
 
+use crate::device::UEventDevice;
 use crate::rules::matcher::Rule;
 
 /// 替换字符串中的变量，比如 $DEVNAME、$ACTION
-pub fn substitute_vars(input: &str, event: &HashMap<String, String>) -> String {
+pub fn substitute_vars(input: &str, device: &UEventDevice) -> String {
     let mut result = input.to_string();
-    for (key, val) in event {
+
+    let devnum_str = device.devnum().map(|n| n.to_string());
+    let major_str = device.major().map(|n| n.to_string());
+    let minor_str = device.minor().map(|n| n.to_string());
+    let devtype = device.devtype();
+    let kernel = device.kernel();
+    let devnode = device.devnode();
+    let devpath_str = device.devpath().to_str();
+    let subsystem = Some(device.subsystem());
+
+    let vars: Vec<(char, Option<&str>)> = vec![
+        ('k', kernel),
+        ('n', devnode),
+        ('p', devpath_str),
+        ('c', devtype),
+        ('t', devtype),
+        ('d', devnum_str.as_deref()),
+        ('s', subsystem),
+        ('m', major_str.as_deref()),
+        ('r', minor_str.as_deref()),
+    ];
+
+    for (var_char, val_opt) in vars {
+        if let Some(val) = val_opt {
+            let pattern = format!("%{}", var_char);
+            result = result.replace(&pattern, val);
+        }
+    }
+
+    for (key, val) in device.properties() {
         let pattern = format!("${{{}}}", key);
         result = result.replace(&pattern, val);
     }
+
     result
 }
 
 pub fn create_device_node(
     devname: &str,
-    event: &HashMap<String, String>,
+    device: &UEventDevice,
     rule: &Rule,
 ) -> std::io::Result<()> {
-    let major = event
-        .get("MAJOR")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    let minor = event
-        .get("MINOR")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+    let major = device.major().unwrap_or(0);
+    let minor = device.minor().unwrap_or(0);
 
-    let sflag = match event.get("DEVTYPE").map(|s| s.as_str()) {
+    let sflag = match device.devtype() {
         Some("disk") | Some("partition") => SFlag::S_IFBLK,
         _ => SFlag::S_IFCHR,
     };
@@ -48,8 +72,7 @@ pub fn create_device_node(
 
     let mode = Mode::from_bits(0o660).unwrap_or(Mode::empty());
 
-    // 实际创建节点
-    match mknod(path, sflag, mode, makedev(major, minor)) {
+    match mknod(path, sflag, mode, makedev(major.into(), minor.into())) {
         Ok(_) => info!("Created device node: {}", devname),
         Err(e) => {
             if e.to_string().contains("File exists") {
@@ -60,7 +83,6 @@ pub fn create_device_node(
         }
     }
 
-    // 设备节点创建成功后，立即设置权限
     let _ = apply_mode(path, &rule.mode);
     let _ = apply_owner(path, &rule.owner);
     let _ = apply_group(path, &rule.group);
@@ -68,7 +90,6 @@ pub fn create_device_node(
     Ok(())
 }
 
-/// 设置设备权限 MODE
 pub fn apply_mode(dev_path: &Path, mode: &Option<String>) -> std::io::Result<()> {
     if let Some(mode_str) = mode {
         let mode_val = u32::from_str_radix(mode_str, 8)
@@ -81,7 +102,6 @@ pub fn apply_mode(dev_path: &Path, mode: &Option<String>) -> std::io::Result<()>
     Ok(())
 }
 
-/// 设置设备属主 OWNER
 pub fn apply_owner(dev_path: &Path, owner: &Option<String>) -> std::io::Result<()> {
     if let Some(owner_name) = owner {
         if let Some(user) = get_user_by_name(owner_name) {
@@ -96,7 +116,6 @@ pub fn apply_owner(dev_path: &Path, owner: &Option<String>) -> std::io::Result<(
     Ok(())
 }
 
-/// 设置设备属组 GROUP
 pub fn apply_group(dev_path: &Path, group: &Option<String>) -> std::io::Result<()> {
     if let Some(group_name) = group {
         if let Some(group) = get_group_by_name(group_name) {
@@ -111,14 +130,15 @@ pub fn apply_group(dev_path: &Path, group: &Option<String>) -> std::io::Result<(
     Ok(())
 }
 
-/// 创建符号链接 SYMLINK+=
 pub fn create_symlinks(
     dev_path: &Path,
     symlinks: &[String],
-    event: &HashMap<String, String>,
+    device: &UEventDevice,
 ) -> std::io::Result<()> {
     for link in symlinks {
-        let substituted = substitute_vars(link, event);
+        info!("Creating symlink for: {}", link);
+        let substituted = substitute_vars(link, device);
+        info!("Substituted symlink path: {}", substituted);
         let link_path = PathBuf::from("/home/rust_udev/testdev").join(substituted);
 
         if link_path.exists() {
@@ -131,8 +151,6 @@ pub fn create_symlinks(
     Ok(())
 }
 
-/// 删除设备节点
-/// 删除设备节点时，可能会有其他进程在使用该节点，因此需要处理可能的错误
 pub fn remove_device_node(dev_path: &Path) -> std::io::Result<()> {
     debug!("entering remove_device_node {:?}", dev_path);
     if dev_path.exists() {
@@ -181,13 +199,15 @@ pub fn remove_symlinks(dev_path: &Path, symlink_dir: &Path) -> std::io::Result<(
     Ok(())
 }
 
-/// 执行命令 RUN+=
-pub fn run_commands(
-    commands: &Vec<String>,
-    event: &HashMap<String, String>,
-) -> std::io::Result<()> {
+pub fn run_commands(commands: &Vec<String>, device: &UEventDevice) -> std::io::Result<()> {
+    let envs = device.properties();
+
     for cmd in commands {
-        let output = Command::new("sh").arg("-c").arg(cmd).envs(event).output()?;
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .envs(envs)
+            .output()?;
 
         if !output.status.success() {
             eprintln!("Command failed: {}", cmd);
